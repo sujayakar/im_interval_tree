@@ -6,11 +6,11 @@
  * use im_interval_tree::{IntervalTree, Interval};
  *
  * // Construct a tree of intervals
- * let tree : IntervalTree<u8> = IntervalTree::new();
- * let tree = tree.insert(Interval::new(Included(1), Excluded(3)));
- * let tree = tree.insert(Interval::new(Included(2), Excluded(4)));
- * let tree = tree.insert(Interval::new(Included(5), Unbounded));
- * let tree = tree.insert(Interval::new(Excluded(7), Included(8)));
+ * let tree : IntervalTree<u8, ()> = IntervalTree::new();
+ * let tree = tree.insert(Interval::new(Included(1), Excluded(3)), ());
+ * let tree = tree.insert(Interval::new(Included(2), Excluded(4)), ());
+ * let tree = tree.insert(Interval::new(Included(5), Unbounded), ());
+ * let tree = tree.insert(Interval::new(Excluded(7), Included(8)), ());
  *
  * // Query for overlapping intervals
  * let query = tree.query_interval(&Interval::new(Included(3), Included(6)));
@@ -46,39 +46,43 @@ pub use crate::interval::Interval;
 use crate::interval::*;
 
 #[derive(Clone, Hash)]
-struct Node<T: Ord + Clone> {
+struct Node<T: Ord + Clone, V: Copy + 'static> {
     interval: Interval<T>,
-    left: Option<Rc<Node<T>>>,
-    right: Option<Rc<Node<T>>>,
+    left: Option<Rc<Node<T, V>>>,
+    right: Option<Rc<Node<T, V>>>,
     height: usize,
     max: Rc<Bound<T>>,
     min: Rc<Bound<T>>,
+
+    value: V,
 }
 
-impl<T: Ord + Clone> Node<T> {
+impl<T: Ord + Clone, V: Copy + 'static> Node<T, V> {
     fn new(
         interval: Interval<T>,
-        left: Option<Rc<Node<T>>>,
-        right: Option<Rc<Node<T>>>,
-    ) -> Node<T> {
+        left: Option<Rc<Node<T, V>>>,
+        right: Option<Rc<Node<T, V>>>,
+        value: V,
+    ) -> Node<T, V> {
         let height = usize::max(Self::height(&left), Self::height(&right)) + 1;
         let max = Self::get_max(&interval, &left, &right);
         let min = Self::get_min(&interval, &left, &right);
         Node {
-            interval: interval,
-            left: left,
-            right: right,
-            height: height,
-            max: max,
-            min: min,
+            interval,
+            left,
+            right,
+            height,
+            max,
+            min,
+            value,
         }
     }
 
-    fn leaf(interval: Interval<T>) -> Node<T> {
-        Node::new(interval, None, None)
+    fn leaf(interval: Interval<T>, value: V) -> Node<T, V> {
+        Node::new(interval, None, None, value)
     }
 
-    fn height(node: &Option<Rc<Node<T>>>) -> usize {
+    fn height(node: &Option<Rc<Node<T, V>>>) -> usize {
         match node {
             None => 0,
             Some(n) => n.height,
@@ -87,8 +91,8 @@ impl<T: Ord + Clone> Node<T> {
 
     fn get_max(
         interval: &Interval<T>,
-        left: &Option<Rc<Node<T>>>,
-        right: &Option<Rc<Node<T>>>,
+        left: &Option<Rc<Node<T, V>>>,
+        right: &Option<Rc<Node<T, V>>>,
     ) -> Rc<Bound<T>> {
         let mid = &interval.high;
         match (left, right) {
@@ -101,8 +105,8 @@ impl<T: Ord + Clone> Node<T> {
 
     fn get_min(
         interval: &Interval<T>,
-        left: &Option<Rc<Node<T>>>,
-        right: &Option<Rc<Node<T>>>,
+        left: &Option<Rc<Node<T, V>>>,
+        right: &Option<Rc<Node<T, V>>>,
     ) -> Rc<Bound<T>> {
         let mid = &interval.low;
         match (left, right) {
@@ -117,36 +121,40 @@ impl<T: Ord + Clone> Node<T> {
         (Self::height(&self.left) as isize) - (Self::height(&self.right) as isize)
     }
 
-    fn insert(&self, interval: Interval<T>) -> Self {
+    fn insert(&self, interval: Interval<T>, value: V) -> Self {
         let res = if &interval < &self.interval {
             let insert_left = match &self.left {
-                None => Node::leaf(interval),
-                Some(left_tree) => left_tree.insert(interval),
+                None => Node::leaf(interval, value),
+                Some(left_tree) => left_tree.insert(interval, value),
             };
             Node::new(
                 self.interval.clone(),
                 Some(Rc::new(insert_left)),
                 self.right.clone(),
+                self.value,
             )
         } else if &interval > &self.interval {
             let insert_right = match &self.right {
-                None => Node::leaf(interval),
-                Some(right_tree) => right_tree.insert(interval),
+                None => Node::leaf(interval, value),
+                Some(right_tree) => right_tree.insert(interval, value),
             };
             Node::new(
                 self.interval.clone(),
                 self.left.clone(),
                 Some(Rc::new(insert_right)),
+                self.value,
             )
         } else {
-            self.clone()
+            let mut new_node = self.clone();
+            new_node.value = value;
+            new_node
         };
         res.balance()
     }
 
-    fn get_minimum(&self) -> Interval<T> {
+    fn get_minimum(&self) -> (Interval<T>, V) {
         match &self.left {
-            None => self.interval.clone(),
+            None => (self.interval.clone(), self.value),
             Some(left_tree) => left_tree.get_minimum(),
         }
     }
@@ -158,11 +166,12 @@ impl<T: Ord + Clone> Node<T> {
                 (Some(left_tree), None) => Some(left_tree.clone()),
                 (None, Some(right_tree)) => Some(right_tree.clone()),
                 (Some(_), Some(right_tree)) => {
-                    let successor = right_tree.get_minimum();
+                    let (successor, value) = right_tree.get_minimum();
                     let new_node = Node::new(
                         successor.clone(),
                         self.left.clone(),
                         right_tree.remove(&successor),
+                        value,
                     );
                     Some(Rc::new(new_node))
                 }
@@ -184,12 +193,12 @@ impl<T: Ord + Clone> Node<T> {
         }
     }
 
-    fn replace_left(&self, new_left: Option<Rc<Node<T>>>) -> Node<T> {
-        Self::new(self.interval.clone(), new_left, self.right.clone())
+    fn replace_left(&self, new_left: Option<Rc<Node<T, V>>>) -> Node<T, V> {
+        Self::new(self.interval.clone(), new_left, self.right.clone(), self.value)
     }
 
-    fn replace_right(&self, new_right: Option<Rc<Node<T>>>) -> Node<T> {
-        Self::new(self.interval.clone(), self.left.clone(), new_right)
+    fn replace_right(&self, new_right: Option<Rc<Node<T, V>>>) -> Node<T, V> {
+        Self::new(self.interval.clone(), self.left.clone(), new_right, self.value)
     }
 
     fn rotate_right(&self) -> Self {
@@ -229,12 +238,12 @@ impl<T: Ord + Clone> Node<T> {
 }
 
 /// An Iterator over Intervals matching some query
-pub struct Iter<T: Ord + Clone> {
-    stack: Vec<Rc<Node<T>>>,
+pub struct Iter<T: Ord + Clone, V: Copy + 'static> {
+    stack: Vec<Rc<Node<T, V>>>,
     query: Interval<T>,
 }
 
-impl<T: Ord + Clone> Iterator for Iter<T> {
+impl<T: Ord + Clone, V: Copy + 'static> Iterator for Iter<T, V> {
     type Item = Interval<T>;
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.stack.pop() {
@@ -278,11 +287,11 @@ impl<T: Ord + Clone> Iterator for Iter<T> {
 /// use im_interval_tree::{IntervalTree, Interval};
 ///
 /// // Construct a tree of intervals
-/// let tree : IntervalTree<u8> = IntervalTree::new();
-/// let tree = tree.insert(Interval::new(Included(1), Excluded(3)));
-/// let tree = tree.insert(Interval::new(Included(2), Excluded(4)));
-/// let tree = tree.insert(Interval::new(Included(5), Unbounded));
-/// let tree = tree.insert(Interval::new(Excluded(7), Included(8)));
+/// let tree : IntervalTree<u8, ()> = IntervalTree::new();
+/// let tree = tree.insert(Interval::new(Included(1), Excluded(3)), ());
+/// let tree = tree.insert(Interval::new(Included(2), Excluded(4)), ());
+/// let tree = tree.insert(Interval::new(Included(5), Unbounded), ());
+/// let tree = tree.insert(Interval::new(Excluded(7), Included(8)), ());
 ///
 /// // Query for overlapping intervals
 /// let query = tree.query_interval(&Interval::new(Included(3), Included(6)));
@@ -305,13 +314,13 @@ impl<T: Ord + Clone> Iterator for Iter<T> {
 /// );
 /// ```
 #[derive(Clone, Hash)]
-pub struct IntervalTree<T: Ord + Clone> {
-    root: Option<Rc<Node<T>>>,
+pub struct IntervalTree<T: Ord + Clone, V: Copy + 'static> {
+    root: Option<Rc<Node<T, V>>>,
 }
 
-impl<T: Ord + Clone> IntervalTree<T> {
+impl<T: Ord + Clone, V: Copy + 'static> IntervalTree<T, V> {
     /// Construct an empty IntervalTree
-    pub fn new() -> IntervalTree<T> {
+    pub fn new() -> IntervalTree<T, V> {
         IntervalTree { root: None }
     }
 
@@ -321,17 +330,17 @@ impl<T: Ord + Clone> IntervalTree<T> {
     /// ```
     /// # use std::ops::Bound::*;
     /// # use im_interval_tree::{IntervalTree, Interval};
-    /// let tree : IntervalTree<u8> = IntervalTree::new();
-    /// let tree = tree.insert(Interval::new(Included(1), Included(2)));
+    /// let tree : IntervalTree<u8, ()> = IntervalTree::new();
+    /// let tree = tree.insert(Interval::new(Included(1), Included(2)), ());
     /// assert_eq!(
     ///     tree.iter().collect::<Vec<Interval<u8>>>(),
     ///     vec![Interval::new(Included(1), Included(2))]
     /// );
     /// ```
-    pub fn insert(&self, interval: Interval<T>) -> IntervalTree<T> {
+    pub fn insert(&self, interval: Interval<T>, value: V) -> IntervalTree<T, V> {
         let new_root = match &self.root {
-            None => Node::leaf(interval),
-            Some(node) => node.insert(interval),
+            None => Node::leaf(interval, value),
+            Some(node) => node.insert(interval, value),
         };
         IntervalTree {
             root: Some(Rc::new(new_root)),
@@ -344,9 +353,9 @@ impl<T: Ord + Clone> IntervalTree<T> {
     /// ```
     /// # use std::ops::Bound::*;
     /// # use im_interval_tree::{IntervalTree, Interval};
-    /// let tree : IntervalTree<u8> = IntervalTree::new();
-    /// let tree = tree.insert(Interval::new(Included(1), Included(2)));
-    /// let tree = tree.insert(Interval::new(Included(1), Included(3)));
+    /// let tree : IntervalTree<u8, ()> = IntervalTree::new();
+    /// let tree = tree.insert(Interval::new(Included(1), Included(2)), ());
+    /// let tree = tree.insert(Interval::new(Included(1), Included(3)), ());
     ///
     /// let tree = tree.remove(&Interval::new(Included(1), Included(2)));
     /// assert_eq!(
@@ -354,7 +363,7 @@ impl<T: Ord + Clone> IntervalTree<T> {
     ///     vec![Interval::new(Included(1), Included(3))]
     /// );
     /// ```
-    pub fn remove(&self, interval: &Interval<T>) -> IntervalTree<T> {
+    pub fn remove(&self, interval: &Interval<T>) -> IntervalTree<T, V> {
         match &self.root {
             None => IntervalTree::new(),
             Some(node) => IntervalTree {
@@ -370,9 +379,9 @@ impl<T: Ord + Clone> IntervalTree<T> {
     /// ```
     /// # use std::ops::Bound::*;
     /// # use im_interval_tree::{IntervalTree, Interval};
-    /// let tree : IntervalTree<u8> = IntervalTree::new();
-    /// let tree = tree.insert(Interval::new(Included(1), Excluded(3)));
-    /// let tree = tree.insert(Interval::new(Included(5), Unbounded));
+    /// let tree : IntervalTree<u8, ()> = IntervalTree::new();
+    /// let tree = tree.insert(Interval::new(Included(1), Excluded(3)), ());
+    /// let tree = tree.insert(Interval::new(Included(5), Unbounded), ());
     ///
     /// let query = tree.query_interval(&Interval::new(Included(3), Included(6)));
     /// assert_eq!(
@@ -400,9 +409,9 @@ impl<T: Ord + Clone> IntervalTree<T> {
     /// ```
     /// # use std::ops::Bound::*;
     /// # use im_interval_tree::{IntervalTree, Interval};
-    /// let tree : IntervalTree<u8> = IntervalTree::new();
-    /// let tree = tree.insert(Interval::new(Included(1), Excluded(3)));
-    /// let tree = tree.insert(Interval::new(Included(5), Unbounded));
+    /// let tree : IntervalTree<u8, ()> = IntervalTree::new();
+    /// let tree = tree.insert(Interval::new(Included(1), Excluded(3)), ());
+    /// let tree = tree.insert(Interval::new(Included(5), Unbounded), ());
     ///
     /// let query = tree.query_point(&2);
     /// assert_eq!(
@@ -423,9 +432,9 @@ impl<T: Ord + Clone> IntervalTree<T> {
     /// ```
     /// # use std::ops::Bound::*;
     /// # use im_interval_tree::{IntervalTree, Interval};
-    /// let tree : IntervalTree<u8> = IntervalTree::new();
-    /// let tree = tree.insert(Interval::new(Included(2), Excluded(4)));
-    /// let tree = tree.insert(Interval::new(Included(5), Unbounded));
+    /// let tree : IntervalTree<u8, ()> = IntervalTree::new();
+    /// let tree = tree.insert(Interval::new(Included(2), Excluded(4)), ());
+    /// let tree = tree.insert(Interval::new(Included(5), Unbounded), ());
     ///
     /// let iter = tree.iter();
     /// assert_eq!(

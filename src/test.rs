@@ -7,7 +7,7 @@ quickcheck! {
     fn test_insert(intervals : HashSet<Interval<u8>>) -> TestResult {
         let mut tree = IntervalTree::new();
         for i in &intervals {
-            tree = tree.insert(i.clone());
+            tree = tree.insert(i.clone(), ());
         }
 
         let mut collected = HashSet::new();
@@ -27,7 +27,7 @@ quickcheck! {
         let mut tree = IntervalTree::new();
         let mut expected = HashSet::new();
         for i in &intervals {
-            tree = tree.insert(i.clone());
+            tree = tree.insert(i.clone(), ());
             if &i != &interval_to_remove {
                 expected.insert(i.clone());
             }
@@ -48,7 +48,7 @@ quickcheck! {
         let mut tree = IntervalTree::new();
         let mut expected = HashSet::new();
         for i in &intervals {
-            tree = tree.insert(i.clone());
+            tree = tree.insert(i.clone(), ());
             if i.overlaps(&query) {
                 expected.insert(i.clone());
             }
@@ -67,7 +67,7 @@ quickcheck! {
         let mut tree = IntervalTree::new();
         let mut expected = HashSet::new();
         for i in &intervals {
-            tree = tree.insert(i.clone());
+            tree = tree.insert(i.clone(), ());
 
             let point_gte_low = match &*i.low {
                 Included(low) => &query >= low,
